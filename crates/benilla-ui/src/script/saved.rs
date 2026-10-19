@@ -274,11 +274,32 @@ fn serialize(v: &Value, depth: usize, seen: &mut HashSet<*const c_void>) -> Opti
         Value::Integer(i) => Some(i.to_string().into_bytes()),
         Value::Number(n) => number(*n).map(String::into_bytes),
         Value::String(s) => Some(quote(&s.as_bytes())),
+        Value::Table(t) if is_object(t) => Some(object_reference(t)),
         Value::Table(t) => table(t, depth, seen),
         // Functions, threads and userdata have no literal; a frame's `[0]` handle is a
         // lightuserdata (`0x701bd0`).
         _ => None,
     }
+}
+
+/// A widget's table: its `[0]` is the object handle (`0x704619` reads it with `lua_rawgeti`,
+/// `0x704623` tests it non-null).
+fn is_object(t: &Table) -> bool {
+    matches!(t.raw_get::<Value>(0), Ok(Value::LightUserData(l)) if !l.0.is_null())
+}
+
+/// What the reference writes for a widget instead of its fields (`0x70463b`-`0x704666`): the
+/// object's name bare through `%s`, so the chunk reloads the live frame by its global, or
+/// `nil --[[ unnamed object ]]` (`0x872e0c`) when it has none.
+fn object_reference(t: &Table) -> Vec<u8> {
+    let name = t
+        .get::<mlua::Function>("GetName")
+        .and_then(|get_name| get_name.call::<Option<mlua::String>>(t.clone()))
+        .ok()
+        .flatten()
+        .map(|n| n.as_bytes().to_vec())
+        .filter(|n| !n.is_empty());
+    name.unwrap_or_else(|| b"nil --[[ unnamed object ]]".to_vec())
 }
 
 /// A Lua number literal: integral values bare, as the reference's `%.16g` prints them, others in
@@ -525,6 +546,36 @@ mod tests {
         assert_eq!(warns.len(), 1, "one line, not one per name: {warns:?}");
         assert!(warns[0].contains("A_FUNCTION") && warns[0].contains("NOT_A_NUMBER"));
         UiScript::new().unwrap().run_chunk(&text).unwrap();
+    }
+
+    /// A frame kept in a saved variable (Decursive keeps `DEFAULT_CHAT_FRAME` as its output
+    /// window) writes as its name and reloads as the same frame, not as a table of its fields
+    /// without its methods; an unnamed one writes nil.
+    #[test]
+    fn a_frame_writes_its_name_and_reloads_as_itself() {
+        let s = UiScript::new().unwrap();
+        s.run(
+            r#"
+            local named = CreateFrame("Frame", "SavedTestOutputFrame")
+            named.channelList = { "General" }
+            SAVED_WINDOWS = { output = named, scratch = CreateFrame("Frame") }
+        "#,
+        )
+        .unwrap();
+        let text = s.saved_variables_bytes_for(&["SAVED_WINDOWS".to_string()]);
+        assert_eq!(
+            String::from_utf8_lossy(&text),
+            "SAVED_WINDOWS = {\n\t[\"output\"] = SavedTestOutputFrame,\n\t[\"scratch\"] = nil --[[ unnamed object ]],\n}\n"
+        );
+        s.run("SAVED_WINDOWS = nil").unwrap();
+        s.run_chunk(&text).unwrap();
+        assert!(s
+            .eval::<bool>(
+                "return SAVED_WINDOWS.output == SavedTestOutputFrame \
+                 and SAVED_WINDOWS.output:GetName() == 'SavedTestOutputFrame' \
+                 and SAVED_WINDOWS.scratch == nil"
+            )
+            .unwrap());
     }
 
     #[test]
