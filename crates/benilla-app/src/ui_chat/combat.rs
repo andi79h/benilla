@@ -724,10 +724,12 @@ enum Arg<'a> {
     Num(i64),
 }
 
-/// `vsnprintf` over the `%s`/`%d` subset the combat-log templates use, with the numbered holes
-/// (`%2$d`) the deDE templates take: a number names its argument in the same list enUS fills in
-/// sequence (`Ihr trefft %1$s. Schaden: %2$d.`). `None` on any mismatch, an unused argument
-/// included.
+/// The line's formatter over the `%s`/`%d` subset the combat-log templates use. `0x626850` formats
+/// through `SStrVPrintf 0x64a8b0`, which takes Storm's ordered printf (`0x6697d0`) once option
+/// `0xa` is set, as the client does at start (`0x402141`, `0x64ede9`); that printf reads `%N$`
+/// (`0x669af2`), so a numbered hole (`%2$d`, the deDE templates') names its argument in the list
+/// enUS fills in sequence (`Ihr trefft %1$s. Schaden: %2$d.`). `None` on any mismatch, an unused
+/// argument included.
 fn fill(template: &str, args: &[Arg<'_>]) -> Option<String> {
     let mut out = String::with_capacity(template.len() + 32);
     let mut used = vec![false; args.len()];
